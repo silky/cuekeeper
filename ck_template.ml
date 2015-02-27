@@ -18,8 +18,9 @@ let index_of key items =
 
 let (>>?=) = Js.Opt.bind
 
-module Make (M : Ck_sigs.MODEL) = struct
+module Make (M : Ck_model_s.MODEL) = struct
   module View = M.View
+  module W = M.WorkTree.Widget
 
   let current_highlight, set_highlight = React.S.create None
 
@@ -63,8 +64,7 @@ module Make (M : Ck_sigs.MODEL) = struct
     let star = a ~a:[a_class [cl]; a_onclick set_star] [pcdata "★"] in
     state_toggles @ [star]
 
-  let toggles_for_type m node s =
-    let uuid = node.View.uuid in
+  let toggles_for_type m uuid s =
     match s with
     | `Action ({Ck_sigs.astate = s; astarred; _} as old) ->
         let set_details n =
@@ -81,8 +81,9 @@ module Make (M : Ck_sigs.MODEL) = struct
     | `Area | `Deleted -> []
 
   let make_state_toggles m node =
-    let init = node.View.init_node_type |> toggles_for_type m node in
-    let toggles = node.View.node_type >|~= toggles_for_type m node in
+    let uuid = node.View.uuid in
+    let init = node.View.init_node_type |> toggles_for_type m uuid in
+    let toggles = node.View.node_type >|~= toggles_for_type m uuid in
     rlist_of ~init toggles
 
   (* Fade item in and out based on state. *)
@@ -107,7 +108,7 @@ module Make (M : Ck_sigs.MODEL) = struct
           end;
           ["removed"]
 
-  (* A <li>[toggles] name x [children]</li> element *)
+  (* A <li>[toggles] name x [children]</li> element *) (* TODO: remove this *)
   let rec make_node_view m ~show_node node : _ Html5.elt =
     let children = node.View.child_views
       |> ReactiveData.RList.map (make_node_view m ~show_node) in
@@ -131,9 +132,73 @@ module Make (M : Ck_sigs.MODEL) = struct
     li_ref := Some result;
     result
 
-  let make_work_view m ~show_node actions =
-    let children = actions
-      |> ReactiveData.RList.map (make_node_view m ~show_node) in
+  (* Fade item in and out based on state. *)
+  let animated widget item_ref =
+    let cancel = ref ignore in
+    W.state widget >|~= fun state ->
+      !cancel ();
+      cancel := ignore;
+      match state with
+      | `New -> ["new"]
+      | `Moved full_height ->
+          cancel := Ck_animate.fade_in_move ~full_height item_ref;
+          ["moved"]
+      | `Current -> []
+      | `Removed (full_height, _time) ->
+          begin match !item_ref with
+          | None -> ()
+          | Some elem ->
+              let elem = Tyxml_js.To_dom.of_element elem in
+              full_height := Some elem##offsetHeight;
+              cancel := Ck_animate.fade_out elem
+          end;
+          ["removed"]
+
+  let render_item m ~show_node ~uuid item =
+    let clicked _ev = show_node uuid; true in
+    let delete _ev = async (fun () -> M.delete m uuid); true in
+    let node = M.TreeNode.Item.node item in
+    let details = Ck_disk_node.details node in
+    let item_cl = class_of_time_and_type (Ck_disk_node.ctime node) details in
+    span ~a:[a_class item_cl] [
+      span ~a:[a_class ["ck-toggles"]] (toggles_for_type m uuid details);
+      span ~a:[a_class ["allow-strikethrough"]] [   (* CSS hack to allow strikethrough and underline together *)
+        a ~a:[a_class ["ck-title"]; a_href "#"; a_onclick clicked] [pcdata (Ck_disk_node.name node)];
+      ];
+      if M.is_root uuid then pcdata ""
+      else a ~a:[a_class ["delete"]; a_onclick delete] [entity "cross"];
+    ]
+
+  (* A <li>[toggles] name x [children]</li> element *)
+  let rec make_tree_node_view m ~show_node widget : _ Html5.elt =
+    let item = W.item widget in
+    let uuid = W.id widget in
+    let children = W.children widget
+      |> ReactiveData.RList.map (make_tree_node_view m ~show_node) in
+    let li_ref = ref None in
+    let li_state = animated widget li_ref in
+    let item_html =
+      ReactiveData.RList.singleton_s item
+      |> ReactiveData.RList.map (render_item m ~show_node ~uuid) in
+    let result =
+      li ~a:[R.Html5.a_class li_state] [
+        R.Html5.span item_html;
+        R.Html5.ul children;
+      ] in
+    li_ref := Some result;
+    result
+
+  let make_work_view m ~show_node groups =
+    let make_work_actions parent =
+      let show_parent _ev = show_node (W.id parent); true in
+      let name = W.item parent >|~= (fun item -> M.TreeNode.Item.node item |> Ck_disk_node.name) in
+      li [
+        a ~a:[a_class ["ck-group"]; a_onclick show_parent] [R.Html5.pcdata name];
+        R.Html5.ul (
+          ReactiveData.RList.map (make_tree_node_view m ~show_node) (W.children parent)
+        )
+      ] in
+    let children = groups |> ReactiveData.RList.map make_work_actions in
     [
       h4 [pcdata "Next actions"];
       R.Html5.ul children;
@@ -155,20 +220,15 @@ module Make (M : Ck_sigs.MODEL) = struct
       R.Html5.ol ~a:[a_class ["ck-history"]] items;
     ]
 
-  let make_tree ~show_node current_mode m =
-    let tab mode contents =
-      let cl = current_mode |> React.S.map (fun m ->
-        if m = mode then ["content"; "active"] else ["content"]
-      ) in
-      div ~a:[R.Html5.a_class cl] contents in
-    let process_tree = M.process_tree m  in
-    let process = make_node_view m ~show_node process_tree in
-    let work = M.work_tree m |> make_work_view m ~show_node in
-    div ~a:[a_class ["tabs-content"]] [
-      tab `Process [ul [process]];
-      tab `Work work;
-      tab `Sync (make_sync (M.history m));
-    ]
+  let make_tree ~show_node m = function
+    | `Process ->
+        let process_tree = M.process_tree m in
+        [ul [make_node_view m ~show_node process_tree]]
+    | `Work ->
+        print_endline "make_tree: work";
+        M.work_tree m |> make_work_view m ~show_node
+    | `Sync -> make_sync (M.history m)
+    | `Contact | `Review | `Schedule -> [p [pcdata "Not implemented yet"]]
 
   let make_mode_switcher current_mode set_current_mode =
     let item name mode =
@@ -362,14 +422,18 @@ module Make (M : Ck_sigs.MODEL) = struct
     (ReactiveData.RList.map snd details_pane, show_node)
 
   let make_top m =
-    let current_mode, set_current_mode = React.S.create `Process in
+    let current_mode, set_current_mode = React.S.create `Work in
     let details_area, show_node = make_details_area m in
+    print_endline "make_top";
+    let left_panel =
+      let live = current_mode >|~= make_tree ~show_node m in
+      rlist_of ~init:(React.S.value live) live in
     [
       make_mode_switcher current_mode set_current_mode;
       div ~a:[a_class ["row"]] [
-        div ~a:[a_class ["medium-6"; "columns"; "ck-tree"]] [
-          make_tree ~show_node current_mode m;
-        ];
+        R.Html5.div ~a:[a_class ["medium-6"; "columns"; "ck-tree"]] (
+          left_panel;
+        );
         R.Html5.div ~a:[a_class ["medium-6"; "columns"]] (
           details_area;
         );

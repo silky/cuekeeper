@@ -133,9 +133,56 @@ end
 module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and type value = string) = struct
   module R = Raw(I)
 
+  module TreeNode = struct
+    module Id_map = Ck_id.M
+    module Child_map = M
+    module Sort_key = Node.SortKey
+
+    module Item = struct 
+      type t = Node.generic   (* Ignore children, though *)
+
+      let equal a b =
+        Node.uuid a = Node.uuid b &&
+        Ck_disk_node.equal a.Node.disk_node b.Node.disk_node
+
+      let compare a b =
+        let open Node in
+        match String.compare (name a) (name b) with
+        | 0 -> compare (uuid a) (uuid b)
+        | r -> r
+
+      let show = Node.name
+      let id = Node.uuid
+      let node n = n.Node.disk_node
+    end
+
+    type t = {
+      item : Node.generic;
+      children : t M.t;
+    }
+
+    let item t = t.item
+    let children t = t.children
+
+    let leaf_of_node n = {
+      item = n;
+      children = M.empty;
+    }
+
+    let id t = Item.id t.item
+
+    let rec equal a b =
+      Item.equal a.item b.item &&
+      Child_map.equal equal a.children b.children
+
+    type move_data = int
+  end
+  module WorkTree = Reactive_tree.Make(Clock)(TreeNode)
+
   type t = {
     current : R.t React.S.t;
     set_current : R.t -> unit;
+    work_tree : WorkTree.t;
   }
 
   type 'a full_node = 'a Node.t
@@ -152,7 +199,7 @@ module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and 
       state : int Slow_set.state React.S.t;
     }
 
-    let eq a b =
+    let equal a b =
       a.uuid = b.uuid &&
       a.init_node_type = b.init_node_type &&
       a.ctime = b.ctime &&
@@ -165,11 +212,6 @@ module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and 
   module NodeList = Delta_RList.Make(Node.SortKey)(View)(M)
 
   let assume_changed _ _ = false
-
-  let make store =
-    R.make store >|= fun r ->
-    let current, set_current = React.S.create ~eq:R.eq r in
-    { current; set_current }
 
   let root t = t.current |> React.S.map ~eq:assume_changed (fun r -> r.R.root)
   let is_root = (=) Ck_id.root
@@ -185,15 +227,6 @@ module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and 
         | _ -> ()
       ) in
     scan "" (root t |> React.S.value);
-    List.rev !results
-
-  let actions parent =
-    let results = ref [] in
-    Node.child_nodes parent |> M.iter (fun _k child ->
-      match child with
-      | {Node.disk_node = {Ck_disk_node.details = `Action _; _}; _} as x -> results := x :: !results
-      | _ -> ()
-    );
     List.rev !results
 
   let uuid = Node.uuid
@@ -262,7 +295,7 @@ module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and 
   let opt_node_eq a b =
     match a, b with
     | None, None -> true
-    | Some a, Some b -> Node.eq a b
+    | Some a, Some b -> Node.equal a b
     | _ -> false
 
   let render_node ?child_filter t (node, state) =
@@ -271,9 +304,9 @@ module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and 
       match child_filter with
       | None -> ReactiveData.RList.empty
       | Some filter -> live_node
-          |> React.S.map ~eq:(M.equal Node.eq) opt_child_nodes
-          |> Slow.make ~eq:Node.eq ~init:node.Node.child_nodes ~delay:1.0
-          |> React.S.map ~eq:(M.equal View.eq) (M.map filter.render)
+          |> React.S.map ~eq:(M.equal Node.equal) opt_child_nodes
+          |> Slow.make ~eq:Node.equal ~init:node.Node.child_nodes ~delay:1.0
+          |> React.S.map ~eq:(M.equal View.equal) (M.map filter.render)
           |> NodeList.make in
     { View.
       uuid = Node.uuid node;
@@ -298,28 +331,34 @@ module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and 
     } in
     render_node t ~child_filter (root_node, React.S.const `Current)
 
+  let is_next_action _k = function
+    | {Node.disk_node = {Ck_disk_node.details = `Action {astate = `Next; _}; _}; _} -> true
+    | _ -> false
+
   let collect_next_actions r =
-    let results = ref M.empty in
+    let results = ref TreeNode.Child_map.empty in
     let rec scan = function
-      | {Node.disk_node = {Ck_disk_node.details = `Area | `Project _; _}; _} as x ->
-          results := actions x |> List.fold_left (fun set action ->
-            match action with
-            | {Node.disk_node = {Ck_disk_node.details = `Action {Ck_sigs.astate = `Next; _}; _}; _} ->
-                M.add (Node.key action) (action :> Node.generic) set
-            | _ -> set
-          ) !results;
-          Node.child_nodes x |> M.iter (fun _k v -> scan v)
+      | {Node.disk_node = {Ck_disk_node.details = `Area | `Project _; _}; _} as parent ->
+          let actions = Node.child_nodes parent |> M.filter is_next_action in
+          if not (M.is_empty actions) then (
+            let tree_node = { TreeNode.
+              item = parent;
+              children = actions |> M.map TreeNode.leaf_of_node
+            } in
+            results := !results |> M.add (Node.key parent) tree_node;
+          );
+          Node.child_nodes parent |> M.iter (fun _k v -> scan v)
       | {Node.disk_node = {Ck_disk_node.details = `Action _; _}; _} -> ()
     in
     scan r.R.root;
     !results
 
-  let work_tree t =
-    t.current
-    |> React.S.map ~eq:(M.equal Node.eq) collect_next_actions
+  let work_tree t = WorkTree.widgets t.work_tree
+(*
     |> Slow.make ~eq:Node.eq ~delay:1.0
-    |> React.S.map ~eq:(M.equal View.eq) (M.map (render_slow_node t))
+    |> React.S.map ~eq:(M.equal View.eq) (M.map (render_slow_node ~child_filter t))
     |> NodeList.make
+*)
 
   let details t uuid =
     let initial_node = R.get_exn (React.S.value t.current) uuid in
@@ -330,4 +369,12 @@ module Make(Clock : Ck_clock.S)(I : Irmin.BASIC with type key = string list and 
 
   let history t =
     t.current >|~= fun r -> r.R.history
+
+  let make store =
+    R.make store >|= fun r ->
+    let current, set_current = React.S.create ~eq:R.eq r in
+    let work_tree = current
+      |> React.S.map ~eq:(M.equal TreeNode.equal) collect_next_actions
+      |> WorkTree.make in
+    { current; set_current; work_tree }
 end
