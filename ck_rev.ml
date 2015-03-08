@@ -6,18 +6,17 @@ open Lwt
 open Ck_sigs
 open Ck_utils
 
-module Make(I : Irmin.BASIC with type key = string list and type value = string) = struct
-  module V = Irmin.View(I)
-  module Top = Graph.Topological.Make(I.History)
+module Make(Git : GIT_STORAGE) = struct
+  module Top = Graph.Topological.Make(Git.Commit.History)
 
-  type commit = float * string
+  type commit = Git.Commit.t
+  type log_entry = float * string
 
   type t = {
-    store : string -> I.t;
-    commit : I.head;
+    commit : Git.Commit.t;
     mutable roots : generic_node M.t;
     index : (Ck_id.t, generic_node) Hashtbl.t;
-    history : commit list;
+    history : log_entry list;
   }
   and 'a node = {
     rev : t;
@@ -69,8 +68,9 @@ module Make(I : Irmin.BASIC with type key = string list and type value = string)
       walk fn (Node.child_nodes v)
     )
 
-  let get_history store =
-    I.history ~depth:10 (store "Read history") >>= fun history ->
+  let get_history _commit = return []
+(*
+    Git.Commit.history ~depth:10 commit >>= fun history ->
     let h = ref [] in
     history |> Top.iter (fun head ->
       h := head :: !h
@@ -84,20 +84,19 @@ module Make(I : Irmin.BASIC with type key = string list and type value = string)
       let date = Irmin.Task.date task |> Int64.to_float in
       (date, summary)
     )
+*)
 
-  let make store =
-    match I.branch (store "Get commit ID") with
-    | `Tag _ -> failwith "Error: store is not fixed (use of_head)!"
-    | `Head commit ->
+  let make commit =
+    Git.Commit.checkout commit >>= fun tree ->
     let disk_nodes = Hashtbl.create 100 in
     let children = Hashtbl.create 100 in
     Hashtbl.add disk_nodes Ck_id.root Ck_disk_node.root;
-    I.list (store "Find db nodes") ["db"] >>=
+    Git.Staging.list tree ["db"] >>=
     Lwt_list.iter_s (function
       | ["db"; uuid] as key ->
           let uuid = Ck_id.of_string uuid in
           assert (uuid <> Ck_id.root);
-          I.read_exn (store "Load db node") key >|= fun s ->
+          Git.Staging.read_exn tree key >|= fun s ->
           let node = Ck_disk_node.of_string s in
           Hashtbl.add disk_nodes uuid node;
           let parent = Ck_disk_node.parent node in
@@ -113,8 +112,8 @@ module Make(I : Irmin.BASIC with type key = string list and type value = string)
       )
     );
     let index = Hashtbl.create 100 in
-    get_history store >>= fun history ->
-    let t = { store; commit; roots = M.empty; index; history} in
+    get_history commit >>= fun history ->
+    let t = { commit; roots = M.empty; index; history} in
     (* todo: reject cycles *)
     let rec make_node uuid =
       let disk_node = Hashtbl.find disk_nodes uuid in
@@ -143,7 +142,7 @@ module Make(I : Irmin.BASIC with type key = string list and type value = string)
 
   let roots t = t.roots
   let history t = t.history
-  let make_view t = V.of_path (t.store "Make view") I.Key.empty
+  let commit t = t.commit
 
   let disk_node n = n.disk_node
 end

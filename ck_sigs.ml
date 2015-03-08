@@ -4,6 +4,49 @@
 open Sexplib.Std
 open Ck_utils
 
+type path = string list
+
+module type GIT_STORAGE = sig
+  module Staging : sig
+    type t
+
+    val empty : unit -> t Lwt.t
+    val list : t -> path -> path list Lwt.t
+    val read_exn : t -> path -> string Lwt.t
+    val update : t -> path -> string -> unit Lwt.t
+    val remove : t -> path -> unit Lwt.t
+  end
+
+  module Commit : sig
+    type t
+    type id
+
+    module History : Graph.Sig.P with type V.t = id
+
+    val checkout : t -> Staging.t Lwt.t
+    val commit : Staging.t -> msg:string -> t Lwt.t
+    val history : ?depth:int -> t -> History.t Lwt.t
+    val merge : t -> t -> [ `Conflict of string | `Ok of t ] Lwt.t
+    val equal : t -> t -> bool
+  end
+
+  module Branch : sig
+    type t
+
+    val head : t -> Commit.t option React.S.t
+
+    val fast_forward_to : t -> Commit.t -> [ `Ok | `Not_fast_forward ] Lwt.t
+  end
+
+  module Repository : sig
+    type t
+
+    val branch : t -> if_new:(Staging.t -> unit Lwt.t) -> string -> Branch.t Lwt.t
+    (** Get the named branch. If the branch does not exist yet, [if_new] is called to get
+     * the initial contents, which are then committed. *)
+  end
+end
+
 type stop = unit -> unit
 
 type action_details = {
@@ -68,9 +111,6 @@ end
 module type REV = sig
   type t
   type +'a node
-  module V : Irmin.VIEW with
-    type key = string list and
-    type value = string
 
   module Node : sig
     val rev : 'a node -> t
@@ -96,13 +136,14 @@ module type REV = sig
       | `Area of [> area] t ]
   end
 
-  type commit = float * string
+  type commit
+  type log_entry = float * string
 
   val equal : t -> t -> bool
 
   val roots : t -> Node.generic M.t
-  val history : t -> commit list  (* XXX: recent *)
-  val make_view : t -> V.t Lwt.t
+  val history : t -> log_entry list  (* XXX: recent *)
+  val commit : t -> commit
 
   val get : t -> Ck_id.t -> Node.generic option
   val parent : t -> Node.generic -> Node.generic option
