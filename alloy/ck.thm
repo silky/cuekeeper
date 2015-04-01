@@ -1,0 +1,84 @@
+<?xml version="1.0"?>
+<alloy>
+
+<view>
+
+<projection> <type name="model/Rev"/> </projection>
+
+<defaultnode/>
+
+<defaultedge/>
+
+<node>
+   <type name="a"/>
+   <type name="b"/>
+   <type name="base"/>
+   <type name="Int"/>
+   <type name="result"/>
+   <type name="String"/>
+   <type name="univ"/>
+   <type name="model/Action"/>
+   <type name="model/Area"/>
+   <type name="model/Done"/>
+   <type name="model/NextEtc"/>
+   <type name="model/Project"/>
+   <type name="model/Rev"/>
+   <type name="model/WaitingForContact"/>
+   <type name="seq/Int"/>
+   <set name="$example_merge_r" type="model/Rev"/>
+   <set name="$example_merge_r&apos;" type="model/Rev"/>
+</node>
+
+<node label="APA">
+   <type name="model/APA"/>
+</node>
+
+<node label="Contact">
+   <type name="model/Contact"/>
+</node>
+
+<node label="Context">
+   <type name="model/Context"/>
+</node>
+
+<node showlabel="no">
+   <set name="areas" type="model/Node"/>
+   <set name="contacts" type="model/Contact"/>
+   <set name="contexts" type="model/Context"/>
+   <set name="my_apa" type="model/APA"/>
+   <set name="roots" type="model/APA"/>
+</node>
+
+<node showlabel="no" color="Blue">
+   <set name="projects" type="model/Node"/>
+</node>
+
+<node showlabel="no" color="Yellow">
+   <set name="actions" type="model/Node"/>
+</node>
+
+<node visible="no">
+   <type name="model/AState"/>
+   <type name="model/Node"/>
+   <type name="model/Type"/>
+</node>
+
+<node visible="yes" showlabel="no">
+   <set name="my_nodes" type="model/Node"/>
+</node>
+
+<edge attribute="yes">
+   <relation name="type"> <type name="model/APA"/> <type name="model/Type"/> </relation>
+</edge>
+
+<edge layout="yes" label="">
+   <relation name="parent"> <type name="model/APA"/> <type name="model/APA"/> </relation>
+</edge>
+
+<edge visible="no">
+   <relation name="child_nodes"> <type name="model/APA"/> <type name="model/APA"/> </relation>
+</edge>
+
+</view>
+
+</alloy>
