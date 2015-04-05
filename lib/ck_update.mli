@@ -17,6 +17,8 @@ module Make(Git : Git_storage_s.S)
              val action_node : action -> Ck_disk_node.Types.action
              val project_node : project -> Ck_disk_node.Types.project
              val area_node : area -> Ck_disk_node.Types.area
+             val contact_node : contact -> Ck_disk_node.Types.contact
+             val context_node : context -> Ck_disk_node.Types.context
            end) : sig
   type t
   type update_cb = R.t -> unit Lwt.t
@@ -51,6 +53,11 @@ module Make(Git : Git_storage_s.S)
    * 4. Call the [on_update] function.
    * When they return, on_update has completed for the new revision. *)
 
+  (* [merge ?base ~theirs ours] merges changes from [base] to [ours] into [theirs] and
+   * returns the resulting merge commit.
+   * Exposed only for unit-testing. *)
+  val merge : ?base:Git.Commit.t -> theirs:Git.Commit.t -> Git.Commit.t -> [`Ok of Git.Commit.t | `Nothing_to_do] Lwt.t
+
   val add : t -> ?uuid:Ck_id.t ->
     parent:[`Toplevel of R.t | `Node of [< area | project ]] ->
     (parent:Ck_id.t -> ctime:float -> unit -> [ Ck_disk_node.Types.area | Ck_disk_node.Types.project | Ck_disk_node.Types.action]) ->
@@ -58,6 +65,7 @@ module Make(Git : Git_storage_s.S)
   val add_contact : t -> base:R.t -> Ck_disk_node.Types.contact -> Ck_id.t Lwt.t
   val add_context : t -> ?uuid:Ck_id.t -> base:R.t -> Ck_disk_node.Types.context -> Ck_id.t Lwt.t
   val delete : t -> [< R.Node.generic] -> unit or_error Lwt.t
+  val clear_conflicts : t -> [< R.Node.generic] -> unit Lwt.t
 
   val set_name : t -> [< R.Node.generic ] -> string -> unit Lwt.t
   val set_description : t -> [< R.Node.generic ] -> string -> unit Lwt.t

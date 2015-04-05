@@ -11,7 +11,8 @@ build-byte:
 	ocamlbuild -cflag -g -no-links -use-ocamlfind client.byte test.byte
 
 _build/js/client.js: build-byte
-	js_of_ocaml +weak.js js/helpers.js _build/js/client.byte
+	#js_of_ocaml +weak.js js/helpers.js _build/js/client.byte
+	js_of_ocaml --pretty --noinline +weak.js js/helpers.js _build/js/client.byte
 
 clean:
 	ocamlbuild -clean
