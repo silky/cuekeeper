@@ -762,6 +762,10 @@ module Make(Clock : Ck_clock.S)
         ())
     >>= fun reading ->
 
+    let switch_to_ck =
+      match R.get t.r (R.Node.uuid switch_to_ck) with
+      | None -> assert false
+      | Some n -> n in
     add
       ~uuid:"6002ea71-6f1c-4ba9-8728-720f4b4c9845"
       ~parent:switch_to_ck
@@ -825,12 +829,14 @@ module Make(Clock : Ck_clock.S)
 
   let fixed_head t = t.fixed_head
 
-  let init_repo staging =
-    Git.Staging.update staging ["ck-version"] "0.1"
+  let init_repo repo =
+    Git.Repository.empty repo >>= fun staging ->
+    Git.Staging.update staging ["ck-version"] "0.1" >>= fun () ->
+    Git.Commit.commit staging ~msg:"Initialise repository"
 
   let make repo =
     let on_update, set_on_update = Lwt.wait () in
-    Git.Repository.branch ~if_new:init_repo repo "master" >>= Up.make ~on_update >>= fun master ->
+    Git.Repository.branch ~if_new:(lazy (init_repo repo)) repo "master" >>= Up.make ~on_update >>= fun master ->
     let r = Up.head master in
     get_log master >>= fun initial_log ->
     let alert, set_alert = React.S.create (R.alert r) in

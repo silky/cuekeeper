@@ -3,6 +3,8 @@ open Lwt
 
 (* let () = Log.(set_log_level INFO) *)
 
+let () = Random.self_init ()
+
 module Queue = Lwt_pqueue.Make(struct
   type t = (float * unit Lwt.u)
   let compare a b =
@@ -59,16 +61,25 @@ module Key = struct
     | r -> r
 end
 
-module ItemMap = Map.Make(Key)
-module Slow = Slow_set.Make(Test_clock)(Key)(ItemMap)
+(*
+module Git = Git_storage.Make(Irmin.Basic(Irmin_unix.Irmin_git.FS)(Irmin.Contents.String))
+let _ = Unix.system "rm -rf /tmp/test_db/.git"
+let () = Irmin_unix.install_dir_polling_listener 1.0
+let config = Irmin_unix.Irmin_git.config ~root:"/tmp/test_db" ()
+*)
 module Git = Git_storage.Make(Irmin.Basic(Irmin_mem.Make)(Irmin.Contents.String))
-module M = Ck_model.Make(Test_clock)(Git)(struct type t = unit end)
-module W = M.Widget
-
 let config = Irmin_mem.config ()
+
 let task s =
   let date = Test_clock.now () |> Int64.of_float in
   Irmin.Task.create ~date ~owner:"User" s
+
+module ItemMap = Map.Make(Key)
+module Slow = Slow_set.Make(Test_clock)(Key)(ItemMap)
+module M = Ck_model.Make(Test_clock)(Git)(struct type t = unit end)
+module W = M.Widget
+module Rev = Ck_rev.Make(Git)
+module Up = Ck_update.Make(Git)(Test_clock)(Rev)
 
 let format_list l = "[" ^ (String.concat "; " l) ^ "]"
 
@@ -163,6 +174,64 @@ let expect_project item =
 let day d = Ck_time.make ~year:2015 ~month:4 ~day:d
 
 let assert_str_equal = assert_equal ~printer:(fun x -> x)
+
+let random_state ~random repo =
+  let rand_int n = Random.State.int random n in
+  let rand_string n = string_of_int (rand_int n) in
+  let rand_time n = float_of_int (rand_int n) in
+
+  let choose options =
+    options.(rand_int (Array.length options)) in
+
+  Git.Repository.empty repo >>= fun s ->
+
+  (* (create objects in order, due to https://github.com/mirage/irmin/issues/190) *)
+  let make_upto n dir fn =
+    let rec aux i =
+      if i = n then return ()
+      else if rand_int 2 = 0 then aux (i + 1)
+      else (
+        let uuid = string_of_int i in
+        let str = fn
+          ~uuid:(Ck_id.of_string uuid)
+          ~name:("n-" ^ rand_string 10)
+          ~description:(rand_string 10)
+          ~ctime:(rand_time 10) in
+        Git.Staging.update s [dir; uuid] str >>= fun () ->
+        aux (i + 1)
+      ) in
+    aux 0 in
+
+  let random_contact ~uuid:_ ~name ~description ~ctime =
+    Ck_disk_node.make_contact ~name ~description ~ctime ()
+    |> Ck_disk_node.contact_to_string in
+
+  let random_context ~uuid:_ ~name ~description ~ctime =
+    Ck_disk_node.make_context ~name ~description ~ctime ()
+    |> Ck_disk_node.context_to_string in
+
+  let areas = ref [Ck_id.root] in
+  let projects = ref [] in
+  let random_apa ~uuid ~name ~description ~ctime =
+    begin match rand_int 3 with
+    | 0 ->
+        let parent = choose (Array.of_list !areas) in
+        areas := uuid :: !areas;
+        Ck_disk_node.make_area ~name ~description ~ctime ~parent ()
+    | 1 ->
+        let parent = choose (Array.of_list (!areas @ !projects)) in
+        projects := uuid :: !projects;
+        Ck_disk_node.make_project ~name ~description ~ctime ~state:(choose [| `Active; `SomedayMaybe |]) ~parent ()
+    | _ ->
+        let parent = choose (Array.of_list (!areas @ !projects)) in
+        Ck_disk_node.make_action ~name ~description ~ctime ~state:(choose [| `Next; `Waiting; `Future |]) ~parent ()  (* XXX *)
+    end
+    |> Ck_disk_node.to_string in
+
+  make_upto (rand_int 3) "contact" random_contact >>= fun _contacts ->
+  make_upto (rand_int 3) "context" random_context >>= fun _contexts ->
+  make_upto (rand_int 5) "db" random_apa >>= fun _nodes ->
+  return s
 
 let suite = 
   "cue-keeper">:::[
@@ -546,6 +615,33 @@ let suite =
 
       let rep = make_repeat 10 Year ~from:(make ~year:2000 ~month:2 ~day:1) in
       next_repeat rep ~now:apr30 |> string_of_user_date |> assert_str_equal "2020-03-01 (Sun)";
+    );
+
+    "merging">:: (fun () ->
+      let seed = Random.int (1 lsl 28) in
+      let random = Random.State.make [| seed |] in
+      try
+        run_with_exn begin fun () ->
+          let rec aux = function
+            | 0 -> return ()
+            | i ->
+                Git.make config task >>= fun repo ->
+                let commit ~parents msg =
+                  random_state ~random repo >>= fun s ->
+                  Git.Commit.commit ~parents s ~msg >>= fun commit ->
+                  Git.Repository.branch repo ~if_new:(lazy (return commit)) msg >>= fun _branch ->
+                  return commit in
+                commit ~parents:[] "base" >>= fun base ->
+                commit ~parents:[base] "theirs" >>= fun theirs ->
+                commit ~parents:[base] "ours" >>= fun ours ->
+                Up.merge ~base ~theirs ours >>= fun result ->
+                ignore result;
+                aux (i - 1) in
+          aux 100
+        end
+      with ex ->
+        Printf.printf "[ random seed = %d ]\n" seed;
+        raise ex
     );
   ]
 

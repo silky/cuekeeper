@@ -39,3 +39,8 @@ val with_context : action -> Ck_id.t option -> action
 val as_area : project -> area
 val as_project : [< area | action] -> project
 val as_action : project -> action
+
+val merge : ?base:[< area | project | action] -> theirs:[< area | project | action] -> [< area | project | action] ->
+  [area | project | action]
+val merge_context : ?base:context -> theirs:context -> context -> context
+val merge_contact : ?base:contact -> theirs:contact -> contact -> contact

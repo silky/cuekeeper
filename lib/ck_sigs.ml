@@ -30,6 +30,7 @@ module type DISK_NODE = sig
   val name : [< generic ] -> string
   val description : [< generic] -> string
   val ctime : [< generic ] -> float
+  val conflicts : [< generic ] -> string list
   val starred : [< project | action] -> bool
   val action_state : action -> action_state
   val action_repeat : action -> Ck_time.repeat option
@@ -104,6 +105,8 @@ module type REV = sig
 
   val roots : t -> [ area | project | action ] M.t
   val commit : t -> commit
+
+  val nodes : t -> [ area | project | action] Ck_id.M.t
 
   val contacts : t -> contact Ck_id.M.t
   val nodes_of_contact : contact -> [ area | project | action ] list

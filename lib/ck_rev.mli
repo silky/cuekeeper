@@ -17,4 +17,6 @@ module Make(Git : Git_storage_s.S) : sig
   val action_node : action -> Ck_disk_node.Types.action
   val project_node : project -> Ck_disk_node.Types.project
   val area_node : area -> Ck_disk_node.Types.area
+  val context_node : context -> Ck_disk_node.Types.context
+  val contact_node : contact -> Ck_disk_node.Types.contact
 end

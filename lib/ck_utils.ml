@@ -9,6 +9,10 @@ let (>|?=) x f =
   | None -> None
   | Some x -> Some (f x)
 
+let default d = function
+  | None -> d
+  | Some x -> x
+
 let error fmt =
   let do_raise msg = raise @@ Failure msg in
   Printf.ksprintf do_raise fmt

@@ -18,6 +18,8 @@ module Make(Git : Git_storage_s.S)
              val action_node : action -> Ck_disk_node.Types.action
              val project_node : project -> Ck_disk_node.Types.project
              val area_node : area -> Ck_disk_node.Types.area
+             val contact_node : contact -> Ck_disk_node.Types.contact
+             val context_node : context -> Ck_disk_node.Types.context
            end) = struct
   open R.Node.Types
 
@@ -137,6 +139,119 @@ module Make(Git : Git_storage_s.S)
   let mem uuid rev =
     R.get rev uuid <> None
 
+  let ok x = return (`Ok x)
+
+  type 'a patch =
+    [ `Add of 'a
+    | `Remove of 'a
+    | `Update of 'a * 'a ] Ck_id.M.t
+
+  type diff = {
+    nodes : [area | project | action] patch;
+    contacts : contact patch;
+    contexts : context patch;
+  }
+
+  let diff base v =
+    let base_nodes = R.nodes base in
+    let v_nodes = R.nodes v in
+    let nodes =
+      Ck_id.M.merge (fun _key o n ->
+        match o, n with
+        | None, None -> assert false
+        | None, Some added -> Some (`Add added)
+        | Some removed, None -> Some (`Remove removed)
+        | Some old, Some current when R.Node.equal (old :> R.Node.generic) (current :> R.Node.generic) -> None
+        | Some old, Some current -> Some (`Update (old, current))
+      ) base_nodes v_nodes in
+    let contacts =
+      Ck_id.M.merge (fun _key o n ->
+        match o, n with
+        | None, None -> assert false
+        | None, Some added -> Some (`Add added)
+        | Some removed, None -> Some (`Remove removed)
+        | Some old, Some current when R.Node.equal (old :> R.Node.generic) (current :> R.Node.generic) -> None
+        | Some old, Some current -> Some (`Update (old, current))
+      ) (R.contacts base) (R.contacts v) in
+    let contexts =
+      Ck_id.M.merge (fun _key o n ->
+        match o, n with
+        | None, None -> assert false
+        | None, Some added ->
+            Some (`Add added)
+        | Some removed, None -> Some (`Remove removed)
+        | Some old, Some current when R.Node.equal (old :> R.Node.generic) (current :> R.Node.generic) -> None
+        | Some old, Some current -> Some (`Update (old, current))
+      ) (R.contexts base) (R.contexts v) in
+    { nodes; contacts; contexts }
+
+  let merge ~their_changes ~our_changes ~stage get disk_node merge dir to_string =
+    get our_changes
+    |> Ck_id.M.bindings
+    |> Lwt_list.iter_s (fun (uuid, patch) ->
+      let their_patch =
+        try Some (Ck_id.M.find uuid (get their_changes))
+        with Not_found -> None in
+      match patch, their_patch with
+      | (`Add node | `Update (_, node)), None ->
+          disk_node node |> to_string
+          |> Git.Staging.update stage [dir; Ck_id.to_string uuid]
+      | `Update (_, ours), Some (`Remove _) ->
+(*           note uuid "Deleted and modified; keeping modified version"; *)
+          disk_node ours |> to_string
+          |> Git.Staging.update stage [dir; Ck_id.to_string uuid]
+      | `Remove _, (None | Some (`Remove _)) ->
+          Git.Staging.remove stage [dir; Ck_id.to_string uuid]
+      | `Remove _, Some (`Update _theirs) ->
+(*           note uuid "Deleted and modified; keeping modified version"; *)
+          return ()
+      | `Add ours, Some (`Add theirs) ->
+          if (R.Node.equal (ours :> R.Node.generic) (theirs :> R.Node.generic)) then return ()
+          else (
+            merge ?base:None ~theirs:(disk_node theirs) (disk_node ours)
+            |> to_string
+            |> Git.Staging.update stage [dir; Ck_id.to_string uuid]
+          )
+      | `Update (base, ours), Some (`Update (_, theirs)) -> 
+          if (R.Node.equal (ours :> R.Node.generic) (theirs :> R.Node.generic)) then return ()
+          else (
+            merge ?base:(Some (disk_node base)) ~theirs:(disk_node theirs) (disk_node ours)
+            |> to_string
+            |> Git.Staging.update stage [dir; Ck_id.to_string uuid]
+          )
+      | `Add _, Some (`Update _ | `Remove _)
+      | (`Update _ | `Remove _), Some (`Add _) ->
+          (* Add implies it wasn't in the base, Update/Remove that it was *)
+          assert false
+    )
+
+  (* Merge a (theirs) with b (ours).
+   * [base] is a least common ancestor, if one exists. *)
+  let merge ?base ~theirs ours =
+    match base with
+    | Some base when Git.Commit.equal base theirs -> ok ours
+    | None -> assert false  (* TODO *)
+    | Some base ->
+    Git.Commit.checkout theirs >>= fun stage ->
+    let time = Ck_time.make ~year:2000 ~month:0 ~day:1 in
+    R.make ~time base >>= fun base_rev ->
+    R.make ~time theirs >>= fun their_rev ->
+    R.make ~time ours >>= fun our_rev ->
+    (* If a node was deleted from base to ours then delete it in theirs, unless theirs still needs it:
+     * - it's the parent of something in theirs
+     * - it's a contact and we're Waiting_for_contact
+     *)
+    let their_changes = diff base_rev their_rev in
+    let our_changes = diff base_rev our_rev in
+
+    let merge f = merge ~their_changes ~our_changes ~stage f in
+    merge (fun x -> x.nodes) R.apa_node Ck_disk_node.merge "db" Ck_disk_node.to_string >>= fun () ->
+    merge (fun x -> x.contexts) R.context_node Ck_disk_node.merge_context "context" Ck_disk_node.context_to_string >>= fun () ->
+    merge (fun x -> x.contacts) R.contact_node Ck_disk_node.merge_contact "contact" Ck_disk_node.contact_to_string >>= fun () ->
+
+    (* TODO: avoid merge if equal *)
+    Git.Commit.commit ~parents:[theirs; ours] stage ~msg:"Merge" >>= ok
+
   (* Branch from base, apply [fn branch] to it, then merge the result back to master.
    * Returns only once [on_update] has been run for the new revision. *)
   let merge_to_master t ~base ~msg fn =
@@ -147,9 +262,8 @@ module Make(Git : Git_storage_s.S)
     let rec aux () =
       (* Merge to branch tip, even if we're on a fixed head *)
       let old_head = branch_head t in
-      Git.Commit.merge old_head pull_rq >>= function
-      | `Conflict msg -> Ck_utils.error "Conflict during merge: %s (discarding change)" msg
-      | `Ok merged when Git.Commit.equal old_head merged ->
+      merge ~base:base_commit ~theirs:old_head pull_rq >>= function
+      | `Nothing_to_do ->
           (* Our change had no effect, so there's nothing to do. *)
           return (return ())
       | `Ok merged ->

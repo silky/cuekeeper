@@ -17,7 +17,7 @@ module Make(Git : Git_storage_s.S) = struct
         contacts : contact_node Ck_id.M.t ref;
         nodes_of_contact : (Ck_id.t, apa) Hashtbl.t;
         actions_of_context : (Ck_id.t, action) Hashtbl.t;
-        index : (Ck_id.t, apa) Hashtbl.t;
+        apa_nodes : apa Ck_id.M.t ref;
         mutable alert : bool;
         mutable schedule : action list;
         mutable expires : Ck_time.user_date option;
@@ -79,6 +79,7 @@ module Make(Git : Git_storage_s.S) = struct
     let name t = Ck_disk_node.name (disk_node t)
     let description t = Ck_disk_node.description (disk_node t)
     let ctime t = Ck_disk_node.ctime (disk_node t)
+    let conflicts t = Ck_disk_node.conflicts (disk_node t)
     let action_state (`Action n) = Ck_disk_node.action_state (`Action n.disk_node)
     let action_repeat (`Action n) = Ck_disk_node.action_repeat (`Action n.disk_node)
     let context (`Action n) = Ck_disk_node.context (`Action n.disk_node)
@@ -196,11 +197,11 @@ module Make(Git : Git_storage_s.S) = struct
     let contacts = ref Ck_id.M.empty in
     let contexts = ref Ck_id.M.empty in
     let children = Hashtbl.create 100 in
-    let index = Hashtbl.create 100 in
+    let apa_nodes = ref Ck_id.M.empty in
     let nodes_of_contact = Hashtbl.create 10 in
     let actions_of_context = Hashtbl.create 10 in
     let t = {
-      commit; contacts; index; nodes_of_contact; children = Ck_id.M.empty;
+      commit; contacts; apa_nodes; nodes_of_contact; children = Ck_id.M.empty;
       contexts; actions_of_context;
       schedule = []; alert = false; valid_from = time; expires = None;
       problems = Hashtbl.create 0;
@@ -218,7 +219,7 @@ module Make(Git : Git_storage_s.S) = struct
             | `Action disk_node -> `Action {rev = t; uuid; disk_node}
             | `Project disk_node -> `Project {rev = t; uuid; disk_node}
             | `Area disk_node -> `Area {rev = t; uuid; disk_node} in
-          Hashtbl.add index uuid node;
+          apa_nodes := !apa_nodes |> Ck_id.M.add uuid node;
           let parent = Ck_disk_node.parent disk_node in
           let old_children =
             try Hashtbl.find children parent
@@ -226,6 +227,7 @@ module Make(Git : Git_storage_s.S) = struct
           Hashtbl.replace children parent (uuid :: old_children);
       | _ -> assert false
     ) >>= fun () ->
+    let apa_nodes = !apa_nodes in
     (* Load contacts *)
     Git.Staging.list tree ["contact"] >>=
     Lwt_list.iter_s (function
@@ -250,14 +252,14 @@ module Make(Git : Git_storage_s.S) = struct
     ) >>= fun () ->
     (* todo: reject cycles *)
     children |> Hashtbl.iter (fun parent children ->
-      if parent <> Ck_id.root && not (Hashtbl.mem index parent) then (
+      if parent <> Ck_id.root && not (Ck_id.M.mem parent apa_nodes) then (
         error "Parent UUID '%a' of child nodes %s missing!" Ck_id.fmt parent (String.concat ", " (List.map Ck_id.to_string children))
       )
     );
     t.children <-
       Hashtbl.fold (fun uuid child_uuids acc ->
         let child_map = child_uuids |> List.fold_left (fun acc child_uuid ->
-          let child = Hashtbl.find index child_uuid in
+          let child = Ck_id.M.find child_uuid apa_nodes in
           process_item ~now:time t child;
           acc |> M.add (Node.key child) child
         ) M.empty in
@@ -280,8 +282,10 @@ module Make(Git : Git_storage_s.S) = struct
         | _ -> return {last with valid_from = time} end
     | _ -> reload ()
 
+  let nodes t = !(t.apa_nodes)
+
   let get t uuid =
-    try Some (Hashtbl.find t.index uuid)
+    try Some (Ck_id.M.find uuid !(t.apa_nodes))
     with Not_found -> None
 
   let get_contact t uuid =
@@ -319,6 +323,8 @@ module Make(Git : Git_storage_s.S) = struct
   let action_node (`Action n) = `Action n.disk_node
   let project_node (`Project n) = `Project n.disk_node
   let area_node (`Area n) = `Area n.disk_node
+  let contact_node (`Contact n) = `Contact n.disk_node
+  let context_node (`Context n) = `Context n.disk_node
 
   let due action =
     match Node.action_state action with
@@ -335,7 +341,7 @@ module Make(Git : Git_storage_s.S) = struct
   let problems t =
     let problems = ref [] in
     t.problems |> Hashtbl.iter (fun uuid msg ->
-      let node = Hashtbl.find t.index uuid in
+      let node = Ck_id.M.find uuid !(t.apa_nodes) in
       problems := ((node :> Node.generic), msg) :: !problems
     );
     !problems
