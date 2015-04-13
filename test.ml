@@ -62,14 +62,10 @@ module Key = struct
     | r -> r
 end
 
-(*
 module Store = Irmin.Basic(Irmin_unix.Irmin_git.FS)(Irmin.Contents.String)
 let _ = Unix.system "rm -rf /tmp/test_db/.git"
 let () = Irmin_unix.install_dir_polling_listener 1.0
 let config = Irmin_unix.Irmin_git.config ~root:"/tmp/test_db" ()
-*)
-module Store = Irmin.Basic(Irmin_mem.Make)(Irmin.Contents.String)
-let config = Irmin_mem.config ()
 
 let task s =
   let date = Test_clock.now () |> Int64.of_float in
@@ -92,6 +88,8 @@ module Test_repo (Store : Irmin.BASIC with type key = string list and type value
   module Up = Ck_update.Make(Git)(Test_clock)(Rev)
 
   (* Workaround for Irmin creating empty directories *)
+  let filter_list = Git.Staging.list
+(*
   let filter_list staging path =
     Git.Staging.list staging path
     >>= Lwt_list.filter_s (fun p ->
@@ -99,6 +97,7 @@ module Test_repo (Store : Irmin.BASIC with type key = string list and type value
         | [] -> false
         | _ -> true
     )
+*)
 
   let assert_git_tree_equals ~msg expected actual =
     Git.Commit.checkout expected >>= fun expected ->
@@ -241,9 +240,9 @@ module Test_repo (Store : Irmin.BASIC with type key = string list and type value
       end
       |> Ck_disk_node.to_string in
 
-    make_upto 2 "contact" random_contact >>= fun contacts ->
-    make_upto 2 "context" random_context >>= fun contexts ->
-    make_upto 5 "db" (random_apa ~contacts ~contexts) >>= fun _nodes ->
+    make_upto (rand_int 2) "contact" random_contact >>= fun contacts ->
+    make_upto (rand_int 2) "context" random_context >>= fun contexts ->
+    make_upto (rand_int 5) "db" (random_apa ~contacts ~contexts) >>= fun _nodes ->
     return s
 end
 
@@ -679,7 +678,7 @@ let suite =
             | i ->
                 let common = Random.State.int random 1000 in
                 (* Note: need to reapply functor to get a fresh memory store *)
-                let module Store = Irmin.Basic(Irmin_mem.Make)(Irmin.Contents.String) in
+(*                 let module Store = Irmin.Basic(Irmin_mem.Make)(Irmin.Contents.String) in *)
                 let module T = Test_repo(Store) in
                 let open T in
 
