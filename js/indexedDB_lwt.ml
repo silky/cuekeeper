@@ -75,7 +75,7 @@ let rec trans_ro (t:store) setup =
   match t.ro_trans with
   | None ->
       let trans = t.db##transaction (Js.array [| t.store_name |], Js.string "readonly") in
-      t.ro_trans <- Some trans;
+(*       t.ro_trans <- Some trans; *)
       trans##onerror <- Dom.handler (fun event ->
         t.ro_trans <- None;
         (* Fatal error *)
