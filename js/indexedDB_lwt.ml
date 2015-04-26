@@ -79,7 +79,8 @@ let rec trans_ro (t:store) setup =
       trans##onerror <- Dom.handler (fun event ->
         t.ro_trans <- None;
         (* Fatal error *)
-        !Lwt.async_exception_hook (idb_error "RO" event);
+(*         !Lwt.async_exception_hook (idb_error "RO" event); *)
+        Lwt.wakeup_exn set_r (idb_error "RO" event);
         Js._true
       );
       trans##oncomplete <- Dom.handler (fun _event ->
